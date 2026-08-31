@@ -674,3 +674,15 @@ test('the same alert can be shown again after closing', async ({ page }) => {
     await forbiddenFolder.click()
     await expect(forbiddenAlert).toBeVisible()
 })
+
+test('English option updates the page language', async ({ page }) => {
+    await page.goto(FRONTEND_URL + '?lang=it')
+    const content = page.locator('#root > [lang]')
+    await expect(content).toHaveAttribute('lang', 'it')
+    await expect(page.locator('#options-button')).toHaveAttribute('aria-label', 'Opzioni')
+
+    await page.locator('#options-button').click()
+    await page.locator('#option-english input').check()
+    await expect(page.locator('#options-button')).toHaveAttribute('aria-label', 'Options')
+    await expect(content).toHaveAttribute('lang', 'en')
+})
