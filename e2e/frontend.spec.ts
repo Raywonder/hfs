@@ -634,6 +634,7 @@ test('file show keeps direction when skipping a broken image', async ({ page, br
         names.forEach(name => fs.rmSync(`tests/page/${name}`, { force: true }))
     }
 })
+
 test('file show stops auto-play after a broken last image', async ({ page, browserName }) => {
     if (browserName !== 'chromium') return
     const names = ['show-forward-a.png', 'show-forward-b.png']
@@ -659,4 +660,17 @@ test('file show stops auto-play after a broken last image', async ({ page, brows
     finally {
         names.forEach(name => fs.rmSync(`tests/page/${name}`, { force: true }))
     }
+})
+
+test('the same alert can be shown again after closing', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    const forbiddenFolder = page.getByRole('link', { name: 'cantListBut, Folder' })
+    const forbiddenAlert = page.getByRole('alertdialog').getByText('Forbidden')
+
+    await forbiddenFolder.click()
+    await expect(forbiddenAlert).toBeVisible()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Close' }).click()
+
+    await forbiddenFolder.click()
+    await expect(forbiddenAlert).toBeVisible()
 })
