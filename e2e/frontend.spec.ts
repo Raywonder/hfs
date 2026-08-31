@@ -730,3 +730,9 @@ test('cut is disabled without a selection', async ({ page }) => {
     await expect(cut).toBeDisabled()
     await expect(clipboard).toBeVisible()
 })
+
+test('tile size slider has an accessible name', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    await page.getByRole('button', { name: 'Options' }).click()
+    await expect(page.getByRole('slider', { name: 'Tiles mode' })).toBeVisible()
+})
