@@ -7,16 +7,17 @@ import { PageProps } from './App'
 import { API_URL, apiCall, useApi, useApiEx, useApiList } from './api'
 import { DataTable, DataTableColumn, DataTableProps } from './DataTable'
 import {
-    CFG, Dict, formatBytes, HTTP_UNAUTHORIZED, newDialog, prefix, shortenAgent, splitAt, tryJson, md, typedKeys, with_,
+    CFG, formatBytes, HTTP_UNAUTHORIZED, newDialog, prefix, splitAt, tryJson, md, typedKeys, with_,
     _dbg, mapFilter, safeDecodeURIComponent, stringAfter, onlyTruthy, formatTimestamp, formatSpeed, copyTextToClipboard
 } from '@hfs/shared'
+import { agentIcons } from './agentIcons'
 import {
     NetmaskField, Flex, IconBtn, useBreakpoint, usePauseButton, useToggleButton, Country,
     hTooltip, Btn, wikiLink
 } from './mui'
 import _ from 'lodash'
 import {
-    AutoDelete, LinkOff, ClearAll, Delete, Download, Settings, SmartToy, Terminal, ContentCopy
+    AutoDelete, LinkOff, AllInclusive, Delete, Download, Settings, SmartToy, Terminal, ContentCopy
 } from '@mui/icons-material'
 import { ConfigForm } from './ConfigForm'
 import { BoolField, SelectField } from '@hfs/mui-grid-form'
@@ -55,7 +56,7 @@ export default function LogsPage({ setTitleSide }: PageProps) {
 
     return h(Fragment, {},
         h(Flex, { gap: 0  },
-            h(Tabs, { value: tab, onChange(ev,i){ setTab(i) } },
+            h(Tabs, { value: tab, onChange(_ev,i){ setTab(i) } },
                 files.map(f => h(Tab, {
                     label: _.get(shorterLabels, f) || logLabels[f],
                     key: f,
@@ -95,15 +96,17 @@ export default function LogsPage({ setTitleSide }: PageProps) {
                             { k: CFG.log_gui, sm: 6, comp: BoolField, label: "Log interface loading", helperText: "Some requests are necessary to load the interface" },
                             { k: CFG.log_api, sm: 6, comp: BoolField, label: "Log API requests", helperText: "Requests for commands" },
                             { k: CFG.log_ua, sm: 6, comp: BoolField, label: "Log User-Agent", helperText: "Contains browser and possibly OS information. Can double the size of your logs on disk." },
-                            { k: CFG.log_spam, sm: 6, comp: BoolField, label: "Log spam requests", helperText: md`Spam requests are *failed* requests that you probably don't want to see` },
+                            { k: CFG.log_host, sm: 6, comp: BoolField, label: "Log Host header" },
+                            { k: CFG.log_spam, sm: 6, comp: BoolField, label: "Log spam requests", helperText: md`Failed requests that you probably don't want to see` },
                             { k: CFG.track_ips, sm: 6, comp: BoolField, label: "Keep track of IPs",
-                                parentProps: { sx: { display: 'flex', gap: 1 } },
+                                parentProps: { sx: { display: 'flex', gap: 1, alignItems: 'flex-start' } },
                                 after: h(Btn, {
-                                    size: 'small', variant: 'outlined', color: 'warning',
+                                    size: 'small', variant: 'outlined', color: 'warning', sx: { mt: '4px' },
                                     confirm: true, doneMessage: true,
                                     onClick: () => apiCall('reset_ips').then(reloadIps)
                                 }, "Reset")
                             },
+                            { k: CFG.debug, sm: 6, comp: BoolField, label: "Debug messages in console" },
                         ]
                     }
                 })
@@ -118,6 +121,7 @@ type LogFileProps = { filter?: (row:any) => boolean, limit?: number, hidden?: bo
 export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: LogFileProps) {
     const [showCountry, setShowCountry] = useState(false)
     const [showAgent, setShowAgent] = useState(false)
+    const [showHost, setShowHost] = useState(false)
     const { pause, pauseButton } = usePauseButton()
     const [showApi, showApiButton] = useToggleButton("Show APIs", "Hide APIs", v => ({
         icon: SmartToy,
@@ -207,7 +211,8 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
             hasFile && h(Btn, {
                 icon: ContentCopy,
                 title: "Copy request",
-                onClick() { copyTextToClipboard(JSON.stringify(_.omit(row, 'id'), undefined, 2)) }
+                doneAnimation: true,
+                onClick: () => copyTextToClipboard(JSON.stringify(_.omit(row, 'id'), undefined, 2))
             })
         ])),
         initialState: isIps ? { sorting: { sortModel: [{ field: 'ts', sort: 'desc' }] } } : undefined,
@@ -216,7 +221,7 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
             pauseButton,
             file.endsWith('log') && showApiButton,
             !connecting && skipped > 0 && h(Btn, {
-                icon: ClearAll,
+                icon: AllInclusive,
                 variant: 'outlined',
                 sx: { ml: { sm: 1 } },
                 labelIf: width > 700,
@@ -242,6 +247,14 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
         ] : isIps || file === 'disconnections' ? [
             tsColumn,
             ipColumn,
+            isIps && {
+                field: 'served',
+                headerName: "Requests",
+                width: 85,
+                sx: { whiteSpace: 'pre-line' },
+                valueGetter: (v, row) => v === undefined ? undefined : v + row.failed, // is this heavy with many records?
+                renderCell: ({ row, value }) => value >= 0 && `✅ ${row.served}\n 🚫 ${row.failed}`,
+            },
             {
                 headerName: "Country",
                 field: 'country',
@@ -260,7 +273,7 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
             {
                 headerName: "Country",
                 field: 'country',
-                valueGetter: (_value: any, row: any) => row.extra?.country,
+                valueGetter: (_value, row) => row.extra?.country,
                 hideUnder: !showCountry || 'xl',
                 renderCell: ({ value }) => h(Country, { code: value, def: '-' }),
             },
@@ -301,6 +314,13 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
                 hideUnder: !showAgent || 'md',
                 valueGetter: (_value: any, row: any) => row.extra?.ua,
                 renderCell: ({ value }) => agentIcons(value),
+            },
+            {
+                field: 'host',
+                headerName: "Host",
+                width: 100,
+                hideUnder: !showHost || 'md',
+                valueGetter: (_value: any, row: any) => row.extra?.host,
             },
             {
                 field: 'notes',
@@ -346,6 +366,8 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
             setShowCountry(true)
         if (extra?.ua && !showAgent)
             setShowAgent(true)
+        if (extra?.host && !showHost)
+            setShowHost(true)
         if (row.uri) {
             const upload = row.method === 'PUT' || extra?.ul
             const partial = upload && stringAfter('?', row.uri).includes('partial=')
@@ -361,61 +383,6 @@ export function LogFile({ file, footerSide, hidden, limit, filter, ...rest }: Lo
         }
         return row
     }
-}
-
-const UW = 'https://upload.wikimedia.org/wikipedia/commons/'
-const CLIENT_ICONS = {
-    Chrome: UW + 'e/e1/Google_Chrome_icon_%28February_2022%29.svg',
-    Chromium: UW + 'f/fe/Chromium_Material_Icon.svg',
-    Firefox: UW + 'a/a0/Firefox_logo%2C_2019.svg',
-    Safari: UW + '../en/7/71/Safari_Liquid_Glass_icon.png',
-    Edge: UW + '9/98/Microsoft_Edge_logo_%282019%29.svg',
-    Opera: UW + '4/49/Opera_2015_icon.svg',
-    Finder: UW + 'thumb/b/b9/Finder_Icon_macOS_Tahoe.png/250px-Finder_Icon_macOS_Tahoe.png',
-    Cyberduck: UW + 'archive/4/48/20091115091336%21Cyberduck_icon.png',
-    ForkLift: UW + '../en/9/96/ForkLift_3_File_Manager_and_File_Transfer_Client_Logo.png',
-    Explorer: UW + '3/33/Microsoft_PowerToys-Logo_File_Explorer_Preview_02.svg',
-    WinSCP: UW + '4/4f/WinSCP_6_Logo.png',
-}
-const OS_ICONS = {
-    Android: UW + 'd/d7/Android_robot.svg',
-    Linux: UW + '0/0a/Tux-shaded.svg',
-    Windows: UW + '0/0a/Unofficial_Windows_logo_variant_-_2002%E2%80%932012_%28Multicolored%29.svg',
-    macOS: UW + '7/74/Apple_logo_dark_grey.svg', // grey works for both themes
-    iOS: UW + '7/74/Apple_logo_dark_grey.svg', // grey works for both themes
-}
-const OSS = {
-    iOS: /iPhone OS|iPad/,
-    macOS: /Mac OS|Darwin/,
-    Windows: /Windows NT|^Microsoft-WebDAV|^WinSCP/,
-    Android: /Android/,
-    Linux: /Linux/,
-}
-
-export function agentIcons(agent: string | undefined) {
-    if (!agent) return
-    const short = shortenAgent(agent)
-    const browserIcon = h(AgentIcon, { k: short, altText: true, map: CLIENT_ICONS })
-    const os = _.findKey(OSS, re => re.test(agent))
-    return h(Box, { sx: { fontSize: '110%' } }, browserIcon, ' ', os && osIcon(os as any))
-}
-
-const alreadyFailed: any = {}
-
-export function osIcon(k: keyof typeof OS_ICONS) {
-    return h(AgentIcon, { k, map: OS_ICONS })
-}
-
-function AgentIcon({ k, map, altText }: { k: string, map: Dict<string>, altText?: boolean }) {
-    const src = map[k]
-    const [err, setErr] = useState(alreadyFailed[k])
-    return !src || err ? h(Fragment, {}, altText ? k : null) : h('img', {
-        src,
-        alt: k + " icon",
-        title: k,
-        style: { height: '1.2em', verticalAlign: 'bottom', marginRight: '.2em' },
-        onError() { setErr(alreadyFailed[k] = true) }
-    })
 }
 
 function parseLogLine(line: string, id: number) {

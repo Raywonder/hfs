@@ -143,6 +143,7 @@ test('search1', async ({ page }) => {
     await page.getByRole('button', { name: 'Search' }).click()
     await page.locator('input[name="name"]').fill('a')
     await page.getByRole('button', { name: 'Continue' }).click()
+    await expect(page.locator('#menu-panel')).toHaveCSS('flex-direction', 'column-reverse')
     await page.getByText('12 folders').click()
     await page.getByRole('link', { name: 'cantListPage/ alfa.txt' }).click()
     await page.getByRole('button', { name: 'Close' }).click()
@@ -194,6 +195,142 @@ test('search1', async ({ page }) => {
     await page.getByRole('textbox', { name: 'Type here to filter the list' }).click()
 })
 
+test('select all resets when the list reloads', async ({ page }) => {
+    await page.goto(FRONTEND_URL + 'for-admins/upload/')
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.getByRole('textbox', { name: 'Username' }).fill(username)
+    await page.getByRole('textbox', { name: 'Password' }).fill(password)
+    await page.getByRole('button', { name: 'Continue' }).click()
+    await expect(page.getByText('alfa.txt')).toBeVisible()
+    await page.getByRole('button', { name: 'Select' }).click()
+
+    const selectAll = page.getByRole('checkbox', { name: 'Select all' })
+    await selectAll.check()
+    await expect(page.getByText('1 selected')).toBeVisible()
+    await page.evaluate(() => (window as any).HFS.reloadList())
+    await expect(page.getByText('1 selected')).toHaveCount(0)
+    await expect(selectAll).not.toBeChecked()
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).HFS.state.props))).toBe(true)
+
+    await page.evaluate(() => {
+        ;(window as any).HFS.state.props.can_archive = false
+        ;(window as any).HFS.state.props.can_delete_children = false
+        ;(window as any).HFS.state.showFilter = false
+    })
+    await expect(page.getByRole('textbox', { name: 'Type here to filter the list below' })).toBeHidden()
+    await page.evaluate(() => {
+        ;(window as any).selectionChecks = 0
+        document.addEventListener('hfs.enableEntrySelection', () => ++(window as any).selectionChecks)
+    })
+    await page.evaluate(() => new Promise<void>(resolve => {
+        const { state } = (window as any).HFS
+        state.list = [...state.list]
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+    }))
+    expect(await page.evaluate(() => (window as any).selectionChecks)).toBe(0)
+})
+
+test('filter resets paging when the first entry stays the same', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    await expect(page.getByRole('link', { name: 'cantListBut, Folder' })).toBeVisible()
+    await page.evaluate(() => (window as any).HFS.state.page_size = 3)
+    await page.locator('#paging > button').last().click()
+    await expect(page.getByRole('link', { name: 'tests, Folder' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Select' }).click()
+    await page.locator('#filter').fill('cant')
+    await expect(page.getByText('5 filtered')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'cantListBut, Folder' })).toBeVisible()
+})
+
+test('mobile timestamps keep updating after the first refresh', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 700 })
+    await page.clock.install({ time: new Date('2026-08-31T23:55:00+02:00') })
+    await page.goto(FRONTEND_URL)
+    await page.clock.runFor(2_000)
+    await page.evaluate(() => {
+        const hfs = (window as any).HFS
+        hfs.state.stopSearch?.()
+        hfs.state.list = [new hfs.DirEntry('probe.txt', { m: new Date('2026-09-01T01:00:00+02:00') })]
+        hfs.state.filteredList = undefined
+        hfs.state.loading = false
+    })
+    const timestamp = page.locator('.entry-ts')
+    const expectedTime = await page.evaluate(() => new Date('2026-09-01T01:00:00+02:00')
+        .toLocaleString(navigator.language, { hour: '2-digit', minute: '2-digit' }))
+    await expect(timestamp).toHaveText(expectedTime)
+
+    await page.clock.runFor(10 * 60_000)
+    await page.clock.fastForward(36 * 60 * 60_000)
+    const expectedDate = await page.evaluate(() => new Date('2026-09-01T01:00:00+02:00')
+        .toLocaleString(navigator.language, { year: '2-digit', month: '2-digit', day: '2-digit' }))
+    await expect(timestamp).toHaveText(expectedDate)
+})
+
+test('stopping a regular listing is not labeled as a search', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    await page.evaluate(() => (window as any).HFS.state.searchManuallyInterrupted = true)
+    const icon = page.locator('#folder-stats [title="Interrupted"]')
+    await expect(icon).toBeVisible()
+    await expect.poll(() => icon.evaluate(el => getComputedStyle(el, '::before').content)).toMatch(/^".+"$/)
+})
+
+test('text buttons support keyboard activation', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    const folder = page.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'f1, Folder' }) })
+    await folder.getByRole('button', { name: 'Menu' }).click()
+    const calculate = page.getByRole('button', { name: 'Calculate' })
+
+    const [buttonFont, parentFont] = await calculate.evaluate(el => [
+        getComputedStyle(el).font,
+        getComputedStyle(el.parentElement!).font,
+    ])
+    await calculate.hover()
+    const { outlineStyle, textDecorationLine } = await calculate.evaluate(el => {
+        const { outlineStyle, textDecorationLine } = getComputedStyle(el)
+        return { outlineStyle, textDecorationLine }
+    })
+    expect.soft(buttonFont).toBe(parentFont)
+    expect.soft(outlineStyle).toBe('none')
+    expect.soft(textDecorationLine).toContain('underline')
+
+    await calculate.focus()
+    await expect(calculate).toBeFocused()
+    await page.keyboard.press('Space')
+    await expect(calculate).toHaveCount(0)
+})
+
+test('async custom entry content ignores stale results', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    await page.waitForFunction(() => !(window as any).HFS.state.loading)
+    await page.evaluate(() => {
+        const HFS = (window as any).HFS
+        const resolvers = (window as any).customCodeResolvers = {} as Record<string, (value: string) => void>
+        document.addEventListener('hfs.additionalEntryDetails', (event: any) => {
+            const name = event.detail.params.entry.name
+            if (name !== 'old-f1' && name !== 'renamed-f1') return
+            event.detail.output.push(new Promise(resolve => resolvers[name] = resolve))
+        })
+        const i = HFS.state.list.findIndex((entry: any) => entry.name === 'f1')
+        const entry = HFS.state.list[i]
+        HFS.state.list[i] = new HFS.DirEntry('old-f1/', { ...entry, key: entry.n })
+    })
+    await page.waitForFunction(() => (window as any).customCodeResolvers['old-f1'])
+    await page.evaluate(() => {
+        const HFS = (window as any).HFS
+        const i = HFS.state.list.findIndex((entry: any) => entry.name === 'old-f1')
+        const entry = HFS.state.list[i]
+        HFS.state.list[i] = new HFS.DirEntry('renamed-f1/', { ...entry })
+    })
+    await page.waitForFunction(() => (window as any).customCodeResolvers['renamed-f1'])
+
+    await page.evaluate(() => (window as any).customCodeResolvers['renamed-f1']('current custom content'))
+    await expect(page.getByText('current custom content')).toBeVisible()
+    await page.evaluate(() => (window as any).customCodeResolvers['old-f1']('stale custom content'))
+    await expect(page.getByText('stale custom content')).toHaveCount(0)
+    await expect(page.getByText('current custom content')).toBeVisible()
+})
+
 test('frontend-admin', async ({ page }) => {
     await page.goto(FRONTEND_URL, { waitUntil: 'networkidle' })
     await page.evaluate(() => document.fonts.ready) // aspetta i font
@@ -231,6 +368,29 @@ test('frontend-admin', async ({ page }) => {
     await page.getByRole('button', { name: 'Admin-panel' }).click()
     const page1 = await page1Promise
     await expect(page1).toHaveTitle(/HFS Admin-panel/)
+})
+
+test('current breadcrumb uses current folder delete permission', async ({ page }) => {
+    await page.goto(FRONTEND_URL + 'f1/')
+    await expect(page.getByRole('link', { name: 'f2, Folder' })).toBeVisible()
+    const breadcrumb = page.locator('.breadcrumb').last()
+
+    await page.evaluate(() => Object.assign((window as any).HFS.state.props, {
+        can_delete: false,
+        can_delete_children: true,
+    }))
+    await breadcrumb.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('heading', { name: 'Folder menu' })).toBeVisible()
+    await expect(dialog.locator('#menu-entry-rename')).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Close' }).click()
+
+    await page.evaluate(() => Object.assign((window as any).HFS.state.props, {
+        can_delete: true,
+        can_delete_children: false,
+    }))
+    await breadcrumb.click()
+    await expect(page.locator('#menu-entry-rename')).toBeVisible()
 })
 
 test('admin1', async ({ page }) => {
@@ -382,7 +542,7 @@ test('anew', async ({ page, browserName }) => {
     await page.getByRole('link', { name: 'folder1, Folder' }).click()
     await page.getByRole('link', { name: 'data.kv' }).click()
     await page.getByRole('button', { name: 'Close' }).click()
-    await page.locator('.list-wrapper > div').press('Control+Backspace')
+    await page.keyboard.press('Control+Backspace')
     await page.getByRole('link', { name: 'work2, Folder' }).click()
     await page.getByRole('link', { name: 'config.yaml', exact: true }).click()
     const page2Promise = page.waitForEvent('popup')
@@ -399,4 +559,236 @@ test('order field', async ({ page }) => {
     await page.getByRole('link', { name: 'gui#%2, Folder' }).click()
     await expect(page.getByRole('link', { name: 'alfa.txt' })).toBeVisible()
     await expect(page.getByText('Not found')).not.toBeVisible()
+})
+
+test('renaming the current Unicode folder navigates to the new path', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    const sourceName = 'rename-current-é'
+    const destName = 'rename-current-done'
+    const sourcePath = `tests/tmp/${sourceName}`
+    const destPath = `tests/tmp/${destName}`
+    cleanup()
+    fs.mkdirSync(sourcePath, { recursive: true })
+    fs.writeFileSync(`${sourcePath}/inside.txt`, 'inside')
+    try {
+        await page.goto(FRONTEND_URL)
+        await page.getByRole('button', { name: 'Login' }).click()
+        await page.getByRole('textbox', { name: 'Username' }).fill(username)
+        await page.getByRole('textbox', { name: 'Password' }).fill(password)
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await expect(page.getByRole('button', { name: username })).toBeVisible()
+        await page.goto(`${FRONTEND_URL}for-admins/upload/${encodeURIComponent(sourceName)}/`)
+        await expect(page.getByRole('link', { name: 'inside.txt' })).toBeVisible()
+
+        await page.locator('.breadcrumb').last().click()
+        const folderDialog = page.getByRole('dialog')
+        await expect(folderDialog.getByRole('heading', { name: 'Folder menu' })).toBeVisible()
+        await folderDialog.getByRole('link', { name: 'Rename' }).click()
+        const renameDialog = page.locator('.dialog-prompt')
+        const renameInput = renameDialog.getByRole('textbox')
+        await expect(renameInput).toHaveValue(sourceName)
+        await renameInput.fill(destName)
+        await renameDialog.getByRole('button', { name: 'Continue' }).click()
+
+        const successDialog = page.getByRole('alertdialog')
+        await expect(successDialog.getByText('Operation successful')).toBeVisible()
+        await successDialog.getByRole('button', { name: 'Close' }).click()
+        await expect(page).toHaveURL(`${FRONTEND_URL}for-admins/upload/${destName}/`)
+        await expect(page.getByRole('link', { name: 'inside.txt' })).toBeVisible()
+    }
+    finally {
+        cleanup()
+    }
+
+    function cleanup() {
+        fs.rmSync(sourcePath, { recursive: true, force: true })
+        fs.rmSync(destPath, { recursive: true, force: true })
+    }
+})
+
+test('plugin upload watcher receives its initial value', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    await page.goto(FRONTEND_URL)
+
+    const initial = await page.evaluate(() => {
+        let value: unknown = 'callback not called'
+        const unwatch = (window as any).HFS.watchState('upload.progress', (next: unknown) => value = next, true)
+        unwatch()
+        return value
+    })
+    expect(initial).toBe(0)
+})
+
+test('plugin resolves a Unicode file element to its entry', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    const name = 'element-entry-é.txt'
+    const path = `tests/tmp/${name}`
+    fs.rmSync(path, { force: true })
+    fs.mkdirSync('tests/tmp', { recursive: true })
+    fs.writeFileSync(path, 'entry')
+    try {
+        await page.goto(FRONTEND_URL)
+        await page.getByRole('button', { name: 'Login' }).click()
+        await page.getByRole('textbox', { name: 'Username' }).fill(username)
+        await page.getByRole('textbox', { name: 'Password' }).fill(password)
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await expect(page.getByRole('button', { name: username })).toBeVisible()
+        await page.goto(`${FRONTEND_URL}for-admins/upload/`)
+
+        const found = await page.getByRole('link', { name }).evaluate(el =>
+            Boolean((window as any).HFS.elementToEntry(el)))
+        expect(found).toBe(true)
+    }
+    finally {
+        fs.rmSync(path, { force: true })
+    }
+})
+
+test('file show does not advance ended media while auto-play is off', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    const names = ['show-ended-a.wav', 'show-ended-b.wav']
+    const wav = Buffer.from('UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA', 'base64')
+    fs.mkdirSync('tests/tmp', { recursive: true })
+    names.forEach(name => fs.writeFileSync(`tests/tmp/${name}`, wav))
+    await page.addInitScript(() => { HTMLMediaElement.prototype.play = async () => {} })
+    try {
+        await page.goto(FRONTEND_URL)
+        await page.getByRole('button', { name: 'Login' }).click()
+        await page.getByRole('textbox', { name: 'Username' }).fill(username)
+        await page.getByRole('textbox', { name: 'Password' }).fill(password)
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await expect(page.getByRole('button', { name: username })).toBeVisible()
+        await page.goto(`${FRONTEND_URL}for-admins/upload/`)
+        await page.getByRole('link', { name: names[0], exact: true }).click()
+        await page.getByRole('link', { name: 'Show' }).click()
+        await expect(page.getByRole('button', { name: 'Auto-play' })).toHaveAttribute('aria-pressed', 'false')
+
+        await page.locator('.file-show audio').dispatchEvent('ended')
+        await expect(page.locator('.file-show .filename')).toContainText(names[0])
+    }
+    finally {
+        names.forEach(name => fs.rmSync(`tests/tmp/${name}`, { force: true }))
+    }
+})
+
+test('file show keeps direction when skipping a broken image', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    const names = ['show-prev-a.png', 'show-prev-b.png', 'show-prev-c.png']
+    fs.copyFileSync('tests/page/gpl.png', `tests/page/${names[0]}`)
+    fs.writeFileSync(`tests/page/${names[1]}`, 'broken image')
+    fs.copyFileSync('tests/page/gpl.png', `tests/page/${names[2]}`)
+    try {
+        await page.goto(`${FRONTEND_URL}tests/page/`)
+        await page.getByRole('link', { name: names[2], exact: true }).click()
+        await page.getByRole('link', { name: 'Show' }).click()
+        await expect.poll(() => page.locator('.file-show img').evaluate(el => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+
+        await page.keyboard.press('ArrowLeft')
+        await expect(page.locator('.file-show .filename')).toContainText(names[0])
+    }
+    finally {
+        names.forEach(name => fs.rmSync(`tests/page/${name}`, { force: true }))
+    }
+})
+
+test('file show stops auto-play after a broken last image', async ({ page, browserName }) => {
+    if (browserName !== 'chromium') return
+    const names = ['show-forward-a.png', 'show-forward-b.png']
+    fs.copyFileSync('tests/page/gpl.png', `tests/page/${names[0]}`)
+    fs.writeFileSync(`tests/page/${names[1]}`, 'broken image')
+    try {
+        await page.goto(`${FRONTEND_URL}tests/page/`)
+        await expect(page.getByRole('link', { name: names[1], exact: true })).toBeVisible()
+        await page.evaluate(names => {
+            const HFS = (window as any).HFS
+            const entries = Object.fromEntries(HFS.state.list.map((entry: any) => [entry.name, entry]))
+            HFS.state.list = names.map(name => entries[name])
+        }, names)
+        await page.getByRole('link', { name: names[0], exact: true }).click()
+        await page.getByRole('link', { name: 'Show' }).click()
+        const autoPlay = page.getByRole('button', { name: 'Auto-play' })
+        await autoPlay.click()
+        await expect(autoPlay).toHaveAttribute('aria-pressed', 'true')
+
+        await page.locator('.file-show .nav').last().click()
+        await expect(autoPlay).toHaveAttribute('aria-pressed', 'false')
+    }
+    finally {
+        names.forEach(name => fs.rmSync(`tests/page/${name}`, { force: true }))
+    }
+})
+
+test('the same alert can be shown again after closing', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    const forbiddenFolder = page.getByRole('link', { name: 'cantListBut, Folder' })
+    const forbiddenAlert = page.getByRole('alertdialog').getByText('Forbidden')
+
+    await forbiddenFolder.click()
+    await expect(forbiddenAlert).toBeVisible()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Close' }).click()
+
+    await forbiddenFolder.click()
+    await expect(forbiddenAlert).toBeVisible()
+})
+
+test('English option updates the page language', async ({ page }) => {
+    await page.goto(FRONTEND_URL + '?lang=it')
+    const content = page.locator('#root > [lang]')
+    await expect(content).toHaveAttribute('lang', 'it')
+    await expect(page.locator('#options-button')).toHaveAttribute('aria-label', 'Opzioni')
+
+    await page.locator('#options-button').click()
+    await page.locator('#option-english input').check()
+    await expect(page.locator('#options-button')).toHaveAttribute('aria-label', 'Options')
+    await expect(content).toHaveAttribute('lang', 'en')
+})
+
+test('plugin icons render keycap emoji', async ({ page }) => {
+    await page.addInitScript(() => {
+        document.addEventListener('hfs.entryIcon', (event: Event) => {
+            const hfs = (window as any).HFS
+            ;(event as CustomEvent).detail.output.push(hfs.h(hfs.Icon, {
+                name: '1️⃣',
+                alt: 'plugin keycap icon',
+            }))
+        })
+    })
+    await page.goto(FRONTEND_URL)
+
+    await expect(page.getByRole('img', { name: 'plugin keycap icon' }).first()).toHaveText('1️⃣')
+})
+
+test('frontend polyfills are installed before shared code runs', async ({ page }) => {
+    await page.addInitScript(() => {
+        delete (Object as any).fromEntries
+    })
+    await page.goto(FRONTEND_URL)
+
+    await expect(page.locator('#options-button')).toBeVisible()
+})
+
+test('cut is disabled without a selection', async ({ page }) => {
+    await page.goto(FRONTEND_URL + 'for-admins/upload/')
+    await page.getByRole('textbox', { name: 'Username' }).fill(username)
+    await page.getByRole('textbox', { name: 'Password' }).fill(password)
+    await page.getByRole('button', { name: 'Continue' }).click()
+    await expect(page.getByRole('link', { name: 'alfa.txt' })).toBeVisible()
+    await page.getByRole('button', { name: 'Select' }).click()
+
+    const selection = page.getByRole('checkbox', { name: 'alfa.txt' })
+    const cut = page.getByRole('button', { name: 'Cut' })
+    const clipboard = page.getByRole('button', { name: /Clipboard/ })
+    await selection.check()
+    await cut.click()
+    await expect(clipboard).toBeVisible()
+
+    await selection.uncheck()
+    await expect(cut).toBeDisabled()
+    await expect(clipboard).toBeVisible()
+})
+
+test('tile size slider has an accessible name', async ({ page }) => {
+    await page.goto(FRONTEND_URL)
+    await page.getByRole('button', { name: 'Options' }).click()
+    await expect(page.getByRole('slider', { name: 'Tiles mode' })).toBeVisible()
 })

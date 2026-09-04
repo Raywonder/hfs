@@ -2,11 +2,11 @@
 
 import { createElement as h, Fragment, useEffect, useMemo, useState } from 'react';
 import { apiCall, useApiEx, useApiList } from './api'
-import { DataTable, fillFlexParentSx } from './DataTable'
+import { DataTable } from './DataTable'
 import { Alert, Box } from '@mui/material'
 import { Delete, Upload } from '@mui/icons-material'
 import { CFG, readFile, selectFiles } from './misc'
-import { Btn, IconBtn } from './mui'
+import { Btn, fillFlexParentSx, IconBtn } from './mui'
 import { PageProps } from './App'
 import _ from 'lodash'
 import { alertDialog, toast } from './dialog'
@@ -68,17 +68,17 @@ export default function LangPage({ setTitleSide }: PageProps) {
     function add() {
         selectFiles(async list => {
             if (!list) return
-            const langs: any = {}
-            for (const f of list)
-                langs[f.name] = await readFile(f)
-            try {
-                await apiCall('add_langs', { langs })
-                reload()
+            const errors = await Promise.all(Array.from(list, f =>
+                readFile(f)
+                    .then(content => apiCall('add_langs', { langs: { [f.name]: content } }))
+                    .then(() => '', e => `${f.name}: ${e.data || e.message || e}`)
+            ))
+            reload()
+            const failed = errors.filter(Boolean)
+            if (failed.length)
+                await alertDialog(failed.join('.\n'), 'error')
+            else
                 toast("Loaded")
-            }
-            catch (e: any) {
-                await alertDialog(e)
-            }
         }, { accept: '.json' })
     }
 }

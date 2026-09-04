@@ -12,13 +12,14 @@ import {
 } from './const'
 import {
     hasPermission, isRoot, nodeIsFolder, nodeStats,
-    simpleWhoToError, statusCodeForMissingPerm, urlToNode, VfsNode, walkNode
+    simpleWhoToError, statusCodeForMissingPerm, urlToNode, VfsNode, VfsNodeWithPath, walkNode
 } from './vfs'
 import fs from 'fs'
 import { mkdir, rename, copyFile, unlink } from 'fs/promises'
 import { basename, dirname, join } from 'path'
 import { getUploadMeta } from './upload'
-import { apiAssertTypes, CFG, moveStoredFileAttrs, pathDecode, pathEncode, popKey, Who, WHO_ADMIN } from './misc'
+import { apiAssertTypes, CFG, join as joinVfs, moveStoredFileAttrs, pathDecode, pathEncode, popKey, Who, WHO_ADMIN } from './misc'
+import { moveUploadOwner, setUploadOwner } from './uploadOwners'
 import { defineConfig } from './config'
 import { getCommentFor, setCommentFor } from './comments'
 import { SendListReadable } from './SendList'
@@ -78,6 +79,7 @@ export const frontEndApis: ApiHandlers = {
             return new ApiError(err)
         try {
             await mkdir(join(parentNode.source!, name))
+            await setUploadOwner(joinVfs(uri, pathEncode(name)), ctx)
             return {}
         }
         catch(e:any) {
@@ -95,7 +97,7 @@ export const frontEndApis: ApiHandlers = {
             throw new ApiError(HTTP_NOT_FOUND)
         if (isRoot(node) || !isValidFileName(dest))
             return new ApiError(HTTP_FORBIDDEN)
-        await requestedRename(node, dest, ctx)
+        await requestedRename(node, dest, ctx, uri)
         return {}
     },
 
@@ -122,7 +124,8 @@ export const frontEndApis: ApiHandlers = {
             return new ApiError(HTTP_UNAUTHORIZED)
         if (!node.source)
             return new ApiError(HTTP_FAILED_DEPENDENCY)
-        await setCommentFor(node.source, comment)
+        if (!await setCommentFor(node.source, comment))
+            return new ApiError(HTTP_SERVER_ERROR)
         return {}
     },
 
@@ -193,12 +196,13 @@ export async function moveFiles(uri_from: any, uri_to: any, ctx: Koa.Context, ov
                     await copyFile(src, dest)
                     await unlink(src)
                 }).then(() => moveStoredFileAttrs(src, dest))
+                    .then(() => moveUploadOwner(from1, joinVfs(uri_to, destName)))
                     .catch(e => e.code || String(e))
         }))
     }
 }
 
-export async function requestedRename(node: VfsNode | undefined, newName: string, ctx: Koa.Context) {
+export async function requestedRename(node: VfsNodeWithPath | undefined, newName: string, ctx: Koa.Context, uri=ctx.path) {
     if (!node)
         throw new ApiError(HTTP_NOT_FOUND)
     // requestedRename is exported, so keep disk rename confinement here even when callers pre-validate
@@ -211,19 +215,21 @@ export async function requestedRename(node: VfsNode | undefined, newName: string
     else {
         if (!node.source)
             throw new ApiError(HTTP_FAILED_DEPENDENCY)
-        const destNode = await urlToNode(pathEncode(newName), ctx, node.parent)
+        const destNode = await urlToNode(pathEncode(newName), ctx, node.parent, { includeHidden: true })
         if (destNode && statusCodeForMissingPerm(destNode, 'can_delete', ctx)) // if destination exists, you need delete permission
             throw new ApiError(ctx.status)
         try {
             const destSource = join(dirname(node.source), newName)
             await rename(node.source, destSource)
             await moveStoredFileAttrs(node.source, destSource)
-            getCommentFor(node.source).then(c => {
-                if (!c) return
-                void setCommentFor(node.source!, '')
-                void setCommentFor(destSource, c)
-            })
-            return {}
+            await moveUploadOwner(uri, joinVfs(dirname(uri), pathEncode(newName)))
+                getCommentFor(node.source).then(c => {
+                    if (!c) return
+                    void setCommentFor(node.source!, '')
+                    void setCommentFor(destSource, c)
+                })
+                return {}
+
         }
         catch (e: any) {
             throw new ApiError(HTTP_SERVER_ERROR, e)

@@ -7,26 +7,25 @@ import {
 } from '@mui/material'
 import { LsEntry } from '../../src/api.vfs'
 import { ListLsItem } from './FilePicker'
-import { markVfsModified, prepareVfsUndo, state, useSnapState } from './state'
+import { id2vfsNode, isDescendantUri, markVfsModified, prepareVfsUndo, reindexVfs, state, useSnapState, VfsNodeAdmin } from './state'
 import VfsTree, { vfsNodeIcon } from './VfsTree'
 import {
-    CFG, matches, newDialog, normalizeHost, onlyTruthy, pathEncode, prefix, VfsNodeAdminSend, HIDE_IN_TESTS, wait,
-    isWhoObject, PERM_KEYS, VfsPerms, WhoVfs,
+    CFG, matches, newDialog, normalizeHost, HIDE_IN_TESTS, wait,
 } from './misc'
 import { Flex, useBreakpoint } from './mui'
 import { reactJoin } from '@hfs/shared'
 import _ from 'lodash'
-import FileForm, { useAccountsApi } from './FileForm'
+import FileForm from './FileForm'
+import { useAccountsApi } from './WhoField'
 import { Add, Delete } from '@mui/icons-material'
 import { toast } from './dialog'
 import { PageProps } from './App'
 
 let selectOnReload: string[] | undefined
 let exposeVfsLoading: Promise<unknown> | undefined
-export const id2vfsNode = new Map<string, VfsNodeAdmin>()
 
 export default function VfsPage({ setTitleSide }: PageProps) {
-    const { vfs, selectedFiles, movingFile, vfsShowDiskContentFor } = useSnapState()
+    const { vfs, selectedFiles, movingFiles, vfsShowDiskContentFor } = useSnapState()
     const { data, reload, element, loading } = useApiEx('get_vfs')
     exposeVfsLoading = loading
     useEffect(() => {
@@ -56,9 +55,9 @@ export default function VfsPage({ setTitleSide }: PageProps) {
     // this will take care of closing the dialog, for the user's convenience, after "cut" button is pressed
     const closeDialogRef = useRef(_.noop)
     useEffect(() => {
-        if (movingFile === selectedFiles[0]?.id)
+        if (selectedFiles[0] && movingFiles.includes(selectedFiles[0].id))
             closeDialogRef.current()
-    }, [movingFile])
+    }, [movingFiles])
 
     const nothingShared = data && !data.root?.children?.length && !data.root?.source
     const hintElement = useMemo(() => nothingShared ? h(Alert, {
@@ -90,9 +89,8 @@ export default function VfsPage({ setTitleSide }: PageProps) {
         : single ? h(FileForm, {
             key: single.id,
             isSideBreakpoint,
-            addToBar: isSideBreakpoint && h(Box, { sx: { flex: 1, textAlign: 'right', mr: 1, color: '#8883' } }, vfsNodeIcon(single)),
             statusApi,
-            saved: () => closeDialogRef.current(),
+            done: () => closeDialogRef.current(),
             accountsApi,
             file: single
         })
@@ -107,7 +105,7 @@ export default function VfsPage({ setTitleSide }: PageProps) {
                     h(ListItemText, { primary: f.name, secondary: f.source }) ))
             )
         )
-    , [accountsApi.element, vfs, diskContent.list, single, selectedFiles])
+    , [accountsApi.element, vfs, diskContent.list, isSideBreakpoint, single, selectedFiles])
 
     useEffect(() => {
         if (isSideBreakpoint || !sideContent) return
@@ -172,76 +170,11 @@ export default function VfsPage({ setTitleSide }: PageProps) {
             sx: { top: 0, flex: '1 1 auto', height: 0 },
         },
         h(Grid, { size: { xs: 12, [sideBreakpoint]: 5, lg: 6, xl: 5 } as any, sx: scrollProps  },
-            h(VfsTree, { statusApi }) ),
+            h(VfsTree, { statusApi, isSideBreakpoint }) ),
         isSideBreakpoint && sideContent && h(Grid, { size: 'grow', sx: { ...scrollProps, maxWidth: '100%' } },
             h(Card, { sx: { overflow: 'initial' } }, // overflow is incompatible with stickyBar
                 h(CardContent, {}, sideContent)) )
     )
-}
-
-export function reindexVfs({
-    node=state.vfs,
-    clearMap=true,
-    sortChildren=false,
-    select=state.selectedFiles,
-}: {
-    node?: VfsNodeAdmin
-    clearMap?: boolean
-    sortChildren?: boolean
-    select?: VfsNodeAdmin[] | string[]
-} = {}) {
-    if (!node) return
-    if (clearMap)
-        id2vfsNode.clear()
-    recur(node, node.parent?.id || '/', node.parent)
-    state.vfsShowDiskContentFor = ''
-    // Reindex can update ids/references; remap caller-provided selections to canonical nodes from id2node.
-    if (select)
-        state.selectedFiles = onlyTruthy(select.map(x => id2vfsNode.get(typeof x === 'string' ? x : x.id)))
-
-    function recur(node: VfsNodeAdmin, pre: string, parent: VfsNodeAdmin | undefined) {
-        const oldId = node.id
-        node.parent = parent
-        node.inherited = getInheritedPerms(node) // refresh cached inheritance while reindexing, because local edits do not get a server roundtrip
-        const newId = node.isRoot ? '/' : prefix(pre, pathEncode(node.name), node.type === 'folder' ? '/' : '')
-        if (oldId && oldId !== newId)
-            id2vfsNode.delete(oldId)
-        node.id = newId
-        node.originalId ||= newId // set only first value (all are truthy)
-        id2vfsNode.set(newId, node)
-        if (!node.children) return
-        if (sortChildren)
-            node.children = _.sortBy(node.children, ['type', x => x.name?.toLocaleLowerCase()])
-        for (const child of node.children)
-            recur(child, node.id, node)
-    }
-}
-
-export function getInheritedPerms(child: VfsNodeAdmin | undefined) {
-    const parent = child?.parent
-    if (!parent) return
-    const ret: VfsPerms = {}
-    for (const k of PERM_KEYS) {
-        const inheritedPerm = getInheritedPerm(parent, k)
-        // null is the form's local representation of an unset permission
-        if (inheritedPerm !== undefined && child[k] == null)
-            ret[k] = inheritedPerm
-    }
-    return _.isEmpty(ret) ? undefined : ret
-
-    function getInheritedPerm(cursor: VfsNodeAdmin | undefined, perm: keyof VfsPerms): WhoVfs | undefined {
-        while (cursor) {
-            let inheritedPerm = cursor[perm]
-            if (inheritedPerm != null) {
-                if (!isWhoObject(inheritedPerm))
-                    return inheritedPerm
-                inheritedPerm = inheritedPerm.children
-                if (inheritedPerm !== undefined)
-                    return inheritedPerm
-            }
-            cursor = cursor.parent
-        }
-    }
 }
 
 export function reloadVfs(pleaseSelect?: string[]) {
@@ -268,22 +201,9 @@ export function deleteVfs(uris: string[]) {
         const siblings = node.parent!.children!
         _.remove(siblings, { id: node.id })
     }
-    if (state.movingFile && topLevelUris.some(uri => state.movingFile === uri || isDescendantUri(state.movingFile, uri)))
-        state.movingFile = ''
+    if (state.movingFiles.some(movingUri => topLevelUris.some(uri => movingUri === uri || isDescendantUri(movingUri, uri))))
+        // deleted nodes cannot remain in the move clipboard because paste would target stale ids
+        state.movingFiles = state.movingFiles.filter(movingUri =>
+            !topLevelUris.some(uri => movingUri === uri || isDescendantUri(movingUri, uri)))
     markVfsModified()
-}
-
-export function isDescendantUri(childUri: string, parentUri: string) {
-    return parentUri.endsWith('/') && childUri.startsWith(parentUri)
-}
-
-export interface VfsNodeAdmin extends Omit<VfsNodeAdminSend, 'birthtime' | 'mtime' | 'children'> {
-    id: string
-    birthtime?: string
-    mtime?: string
-    default?: string
-    children?: VfsNodeAdmin[]
-    parent?: VfsNodeAdmin
-    isRoot?: true
-    originalId: string
 }

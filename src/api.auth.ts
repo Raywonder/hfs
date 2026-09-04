@@ -15,17 +15,21 @@ import { failAllowNet, sessionDuration } from './middlewares'
 import { clearTextLogin, getCurrentUsername, setLoggedIn, srpServerStep1 } from './auth'
 import { defineConfig } from './config'
 import events from './events'
-import { apiAssertTypes } from './misc'
+import { apiAssertTypes, CFG } from './misc'
+import { getSessionId } from './uploadOwners'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 
-const ongoingLogins:Record<string,SRPServerSessionStep1> = {} // store data that doesn't fit session object
-const keepSessionAlive = defineConfig('keep_session_alive', true)
+const ongoingLogins:Record<string, SRPServerSessionStep1> = {} // store data that doesn't fit session object
+const keepSessionAlive = defineConfig(CFG.keep_session_alive, true)
 const fakeSrpSecret = randomBytes(32)
 
 const refresh_session: ApiHandler = async ({}, ctx) => {
+    if (!ctx.session)
+        return new ApiError(HTTP_SERVER_ERROR)
+    getSessionId(ctx) // anonymous upload ownership must be bound before any abortible upload request
     const username = getCurrentUsername(ctx)
     const isAdmin = ctxAdminAccess(ctx) || undefined
-    return !ctx.session ? new ApiError(HTTP_SERVER_ERROR) : {
+    return {
         username,
         expandedUsername: Array.from(expandUsername(username)),
         isAdmin,
@@ -81,7 +85,8 @@ export const authApis = {
             // keep the public handshake identifier independent of predictable application PRNG state
             const sid = randomUUID()
             ongoingLogins[sid] = srpServer
-            setTimeout(()=> delete ongoingLogins[sid], 60_000)
+            setTimeout(()=> delete ongoingLogins[sid], 60_000) // client must complete api sequence (loginSrp2) within 1 minute or will be discarded to avoid memory leaks
+                                                    // 60-second expiry bounded 5k challenges to ~37 MB in a local saturation test, so an additional cap isn't justified
             ctx.session.loggingIn = { username, sid } // temporarily store until process is complete
             return rest
         }
@@ -120,7 +125,7 @@ export const authApis = {
             return new ApiError(HTTP_NOT_FOUND)
         try {
             const M2 = await step1.step2(BigInt(pubKey), BigInt(proof))
-                .catch(() => { throw '' })
+                .catch(() => { throw '' }) // falsy value for later
             await setLoggedIn(ctx, username)
             return {
                 proof: String(M2),
@@ -139,7 +144,6 @@ export const authApis = {
         }
     },
 
-    // this api is here for consistency, but frontend is actually using
     async logout({}, ctx) {
         if (!ctx.session)
             return new ApiError(HTTP_SERVER_ERROR)

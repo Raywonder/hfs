@@ -1,14 +1,14 @@
-import { getNodeByName, statusCodeForMissingPerm, VfsNode } from './vfs'
+import { getNodeByName, statusCodeForMissingPerm, VfsNodeWithPath } from './vfs'
 import Koa from 'koa'
 import {
     HTTP_CONFLICT, HTTP_FOOL, HTTP_INSUFFICIENT_STORAGE, HTTP_RANGE_NOT_SATISFIABLE, HTTP_NO_CONTENT, HTTP_SERVER_ERROR,
-    HTTP_PRECONDITION_FAILED, HTTP_LENGTH_REQUIRED, MTIME_CHECK,
+    HTTP_PRECONDITION_FAILED, HTTP_LENGTH_REQUIRED, MTIME_CHECK, UPLOAD_TEMP_PREFIX,
 } from './const'
 import { basename, dirname, extname, join } from 'path'
 import fs from 'fs'
 import {
     isValidFileName, loadFileAttr, pendingPromise, storeFileAttr, try_, createStreamLimiter, pathEncode,
-    enforceFinal, Timeout, waitFor,
+    CFG, enforceFinal, Timeout, waitFor,
 } from './misc'
 import { defineConfig } from './config'
 import { getDiskSpaceSync } from './util-os'
@@ -21,16 +21,22 @@ import events from './events'
 import { rm, rename, utimes } from 'fs/promises'
 import { expiringCache } from './expiringCache'
 import { onProcessExit } from './first'
+import { deleteUploadOwner, setUploadOwner } from './uploadOwners'
 
-export const deleteUnfinishedUploadsAfter = defineConfig<undefined|number>('delete_unfinished_uploads_after', 86_400)
-export const minAvailableMb = defineConfig('min_available_mb', 100)
-export const dontOverwriteUploading = defineConfig('dont_overwrite_uploading', true)
+export const deleteUnfinishedUploadsAfter = defineConfig<undefined|number>(CFG.delete_unfinished_uploads_after, 86_400)
+export const minAvailableMb = defineConfig(CFG.min_available_mb, 100)
+export const dontOverwriteUploading = defineConfig(CFG.dont_overwrite_uploading, true)
 
 const waitingToBeDeleted: Record<string, {
     timeout: Timeout, // pending action
     expires: number, // when
     mtime?: any
 }> = {}
+
+function cancelDeletion(path: string) {
+    clearTimeout(waitingToBeDeleted[path]?.timeout)
+    delete waitingToBeDeleted[path]
+}
 onProcessExit(() => {
     if (!Object.keys(waitingToBeDeleted).length) return
     console.log("Removing unfinished uploads")
@@ -53,13 +59,13 @@ function setUploadMeta(path: string, ctx: Koa.Context) {
 }
 
 export function getUploadTempFor(fullPath: string) {
-    return join(dirname(fullPath), 'hfs$upload-' + basename(fullPath).slice(-200))
+    return join(dirname(fullPath), UPLOAD_TEMP_PREFIX + basename(fullPath).slice(-200))
 }
 
 const diskSpaceCache = expiringCache<ReturnType<typeof getDiskSpaceSync>>(3_000) // invalidate shortly
 const uploadingFiles = new Map<string, { ctx: Koa.Context, size: number, got: number }>()
 // initially sync for formidable; still sync to avoid async races and PUT piping gaps
-export function uploadWriter(base: VfsNode, baseUri: string, filename: string, ctx: Koa.Context) {
+export function uploadWriter(base: VfsNodeWithPath, baseUri: string, filename: string, ctx: Koa.Context) {
     if (!filename || !isValidFileName(filename) || !filename)
         return fail(HTTP_FOOL)
     if (statusCodeForMissingPerm(base, 'can_upload', ctx))
@@ -110,6 +116,7 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
             setUploadMeta(dir, ctx)
         // use temporary name while uploading
         const tempName = getUploadTempFor(fullPath)
+        const tempUri = enforceFinal('/', baseUri) + pathEncode(basename(tempName))
         // try to catch errors early (sync): this is avoiding on chrome139 when uploading a big file (1GB) to get miss the error code and have to make a `simulate`
         try { fs.accessSync(tempName, fs.constants.W_OK) }
         catch {
@@ -133,8 +140,11 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
                 return fail(HTTP_PRECONDITION_FAILED)
             }
         // append if resuming
-        if (!resume && stats)
+        if (!resume && stats) {
+            // a new upload discards the old resumable temp, so its owner grant must not survive
+            deleteUploadOwner(tempUri)
             fs.unlinkSync(tempName)
+        }
         const writeStream = createStreamLimiter(isNaN(contentLength) ? Infinity : contentLength)
         const fullSize = stillToWrite + resume
         // allow plugins to mess with the write-stream, because the read-stream can be complicated in case of multipart
@@ -155,6 +165,9 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
         const tracked = { ctx, got: 0, size: stillToWrite }
         uploadingFiles.set(fullPath, tracked)
         console.debug('Upload started')
+        let tempOwnerSet = false
+        // ownership must be visible before a follow-up request can act on the unfinished file
+        ctx.req.once('aborted', setTempOwner)
         // the file stream doesn't have an event for data being written, so we use 'data' of its feeder, which happens before, so we postpone a bit, trying to have a fresher number
         writeStream.on('data', () => setTimeout(() => tracked.got = bytesGot()))
 
@@ -175,7 +188,8 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
                     return rm(tempName).catch(() => {})
                 if (ctx.isAborted()) { // in the very unlikely case the connection is interrupted between last-byte and here, we still consider it unfinished, as the client had no way to know, and will resume, but it would get an error if we finish the process
                     const sec = deleteUnfinishedUploadsAfter.get()
-                    return _.isNumber(sec) && delayedDelete(tempName, sec)
+                    setTempOwner()
+                    return _.isNumber(sec) && delayedDelete(tempName, sec, tempUri)
                 }
                 if (isPartial) // we are supposed to leave the unfinished upload as it is, with its temp name
                     return ctx.status = HTTP_NO_CONTENT // lockMiddleware contains an empty string, so we must take care of the status
@@ -198,6 +212,7 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
                         { timeout: 10_000 })
                     if (!done)
                         throw 'EBUSY'
+                    deleteUploadOwner(tempUri) // the temp URI no longer exists after rename; final ownership is recorded below
                     if (mtime) // so we use it to touch the file
                         await utimes(dest, Date.now() / 1000, mtime / 1000)
                     cancelDeletion(tempName) // not necessary, as deletion's failure is silent, but still
@@ -206,6 +221,7 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
                     if (ctx.query.comment)
                         void setCommentFor(dest, String(ctx.query.comment))
                     obj.uri = enforceFinal('/', baseUri) + pathEncode(basename(dest))
+                    await setUploadOwner(obj.uri, ctx)
                     events.emit('uploadFinished', obj)
                     console.debug("Upload finished", dest)
                     if (resEvent) for (const cb of resEvent)
@@ -248,6 +264,12 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
         function bytesGot() {
             return fileStream.bytesWritten + fileStream.writableLength
         }
+
+        function setTempOwner() {
+            if (tempOwnerSet) return
+            tempOwnerSet = true
+            void setUploadOwner(tempUri, ctx)
+        }
     }
     catch (e: any) {
         releaseFile()
@@ -262,21 +284,17 @@ export function uploadWriter(base: VfsNode, baseUri: string, filename: string, c
         return false
     }
 
-    function delayedDelete(path: string, secs: number) {
+    function delayedDelete(path: string, secs: number, tempUri: string) {
         clearTimeout(waitingToBeDeleted[path]?.timeout)
         return waitingToBeDeleted[path] = {
             mtime,
             expires: Date.now() + secs * 1000,
             timeout: setTimeout(() => {
                 delete waitingToBeDeleted[path]
+                deleteUploadOwner(tempUri)
                 rm(path).catch(() => {})
             }, secs * 1000)
         }
-    }
-
-    function cancelDeletion(path: string) {
-        clearTimeout(waitingToBeDeleted[path]?.timeout)
-        delete waitingToBeDeleted[path]
     }
 
     function releaseFile() {

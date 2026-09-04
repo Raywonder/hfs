@@ -15,8 +15,8 @@ import langApis from './api.lang'
 import netApis from './api.net'
 import logApis from './api.log'
 import certApis from './api.cert'
-import { getConnections } from './connections'
-import { apiAssertTypes, debounceAsync, isLocalHost, makeNetMatcher, try_, typedEntries, waitFor } from './misc'
+import { getConnections, normalizeIp } from './connections'
+import { apiAssertTypes, CFG, debounceAsync, isLocalHost, makeNetMatcher, try_, typedEntries, waitFor } from './misc'
 import { accountCanLoginAdmin, accounts } from './perm'
 import Koa from 'koa'
 import { cloudflareDetected, getProxyDetected } from './middlewares'
@@ -109,7 +109,7 @@ export const adminApis = {
         })
         const res = await Promise.allSettled(ips.map(ip2country))
         return {
-            codes: res.map(x => x.status === 'rejected' || x.value === '-' ? '' : x.value)
+            codes: res.map(x => x.status === 'rejected' ? '' : x.value)
         }
     },
     is_ip_blocked({ ips }) {
@@ -141,7 +141,7 @@ export const adminApis = {
         return {}
     },
 
-    async get_status() {
+    async get_status(_params, ctx) {
         return {
             started: HFS_STARTED,
             build: BUILD_TIMESTAMP,
@@ -154,6 +154,7 @@ export const adminApis = {
             configFile: configFile.getPath(),
             urls: await getUrls(),
             ips: await getIps(false),
+            connectionAddress: normalizeIp(ctx.socket.localAddress || ''),
             baseUrl: await getBaseUrlOrDefault(),
             roots: roots.get(),
             anyAccountCanLoginAdmin: anyAccountCanLoginAdmin(),
@@ -172,7 +173,7 @@ export const adminApis = {
         }
     },
 
-    async add_block({ merge, ip, expire, comment }: BlockingRule & { merge?: Partial<BlockingRule> }) {
+    add_block({ merge, ip, expire, comment }: BlockingRule & { merge?: Partial<BlockingRule> }) {
         apiAssertTypes({
             string: { ip },
             string_undefined: { comment, expire },
@@ -195,6 +196,7 @@ export const adminApis = {
 
 } satisfies ApiHandlers
 
+// wrap every admin API so individual handlers cannot skip access control
 for (const [k, was] of typedEntries(adminApis))
     (adminApis[k] as any) = ((params, ctx) => {
         if (ctxAdminAccess(ctx))
@@ -205,10 +207,10 @@ for (const [k, was] of typedEntries(adminApis))
             : new ApiError(HTTP_UNAUTHORIZED, props)
     }) satisfies ApiHandler
 
-export const localhostAdmin = defineConfig('localhost_admin', true)
-export const adminNet = defineConfig('admin_net', '', v => makeNetMatcher(v, true) )
-export const favicon = defineConfig('favicon', '')
-export const title = defineConfig('title', "File server")
+export const localhostAdmin = defineConfig(CFG.localhost_admin, true)
+export const adminNet = defineConfig(CFG.admin_net, '', v => makeNetMatcher(v, true) )
+export const favicon = defineConfig(CFG.favicon, '')
+export const title = defineConfig(CFG.title, "File server")
 
 export function ctxAdminAccess(ctx: Koa.Context) {
     if (preventAdminAccess(ctx))

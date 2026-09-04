@@ -1,14 +1,13 @@
 import Koa from 'koa'
 import Busboy from 'busboy'
-import { once } from 'events'
-import { hasPermission, urlToNode, VfsNode } from './vfs'
+import { hasPermission, urlToNode, VfsNodeWithPath } from './vfs'
 import { dirname } from 'path'
 import { uploadWriter } from './upload'
 import { HTTP_BAD_REQUEST } from './cross-const'
 import { onFirstEvent } from './first'
 import { try_ } from './cross'
 
-export async function handleMultipartUpload(ctx: Koa.Context, node: VfsNode) {
+export async function handleMultipartUpload(ctx: Koa.Context, node: VfsNodeWithPath) {
     if (ctx.request.type !== 'multipart/form-data')
         return ctx.status = HTTP_BAD_REQUEST
     ctx.state.uploads = []
@@ -41,7 +40,7 @@ export async function handleMultipartUpload(ctx: Koa.Context, node: VfsNode) {
         ctx.status = HTTP_BAD_REQUEST
     })
     ctx.req.pipe(bb)
-    await once(bb, 'finish')
+    await new Promise(res => onFirstEvent(bb, ['finish','error'], res)) // parser errors are handled above as 400 and must complete the request without rejecting
     await Promise.all(fileJobs)
     if (!ctx.state.uploads?.length) {
         if (!errors.length)
@@ -76,7 +75,7 @@ export async function handleMultipartUpload(ctx: Koa.Context, node: VfsNode) {
         const prefix = dirname(fn.replaceAll('\\', '/'))
         if (prefix === '.') // no subdir
             return false
-        const subfolderNode = await urlToNode(prefix + '/', ctx, node, true) // final slash = explicitly a folder even if it doesn't exist on disk
+        const subfolderNode = await urlToNode(prefix + '/', ctx, node, { allowMissing: true }) // final slash = explicitly a folder even if it doesn't exist on disk
         return subfolderNode && !hasPermission(subfolderNode, 'can_upload', ctx)
     }
 }

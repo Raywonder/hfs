@@ -6,14 +6,14 @@ import { CardMembership, Check, Dns, HomeWorkTwoTone, Lock, Public, PublicTwoTon
     Error as ErrorIcon, SvgIconComponent, Search } from '@mui/icons-material'
 import { apiCall, useApiEvents, useApiEx } from './api'
 import {
-    closeDialog, DAY, formatTimestamp, wait, wantArray, with_, PORT_DISABLED, isIP, CFG, md,
+    closeDialog, formatTimestamp, wait, wantArray, with_, PORT_DISABLED, isIP, CFG, md,
     useRequestRender, replace, restartAnimation, prefix, isIpLan, HIDE_IN_TESTS
 } from './misc'
-import { Flex, LinkBtn, Btn, Country, wikiLink } from './mui'
+import { Flex, LinkBtn, Btn, Country, wikiLink, NetmaskField } from './mui'
 import { alertDialog, confirmDialog, formDialog, promptDialog, toast, waitDialog } from './dialog'
 import { BoolField, Form, MultiSelectField, NumberField, SelectField } from '@hfs/mui-grid-form'
-import { suggestMakingCert } from './OptionsPage'
-import { changeBaseUrl } from './FileForm'
+import { suggestMakingCert } from './cert'
+import { changeBaseUrl } from './baseUrl'
 import { adminApis } from '../../src/adminApis'
 import { ALL, WITH_IP } from './countries'
 import _ from 'lodash'
@@ -40,7 +40,7 @@ export default function InternetPage({ setTitleSide }: PageProps) {
     const localColor = with_([status.data?.http?.error, status.data?.https?.error], ([h, s]) =>
         h && s ? 'error' : h || s ? 'warning' : 'success')
     const nat = useApiEx<typeof adminApis.get_nat>('get_nat', {}, { timeout: 20 })
-    const { data: publicIps } = useApiEx<typeof adminApis.get_public_ips>('get_public_ips', { timeout: 20 })
+    const { data: publicIps, error: publicIpsError } = useApiEx<typeof adminApis.get_public_ips>('get_public_ips', { timeout: 20 })
     const { data } = nat
     const port = data?.internalPort
     const wrongMap = data?.mapped && data.mapped.private.port !== port && data.mapped.private.port
@@ -124,8 +124,9 @@ export default function InternetPage({ setTitleSide }: PageProps) {
                 [CFG.geo_allow]: null | boolean
                 [CFG.geo_list]: string[]
                 [CFG.geo_allow_unknown]: boolean
+                [CFG.geo_ignore_net]: string
             }>, {
-                keys: [ CFG.geo_enable, CFG.geo_allow, CFG.geo_list, CFG.geo_allow_unknown ],
+                keys: [ CFG.geo_enable, CFG.geo_allow, CFG.geo_list, CFG.geo_allow_unknown, CFG.geo_ignore_net ],
                 form: values => ({ fields: [
                     { k: CFG.geo_enable, comp: BoolField, label: "Enable", helperText: md("Necessary database will be downloaded every month (2MB). Service is made possible thanks to [IP2Location](https://www.ip2location.com).") },
                     ...!values?.[CFG.geo_enable] ? [] : [
@@ -152,6 +153,15 @@ export default function InternetPage({ setTitleSide }: PageProps) {
                             label: "When country cannot be determined",
                             helperText: "Local IPs are ignored",
                             options: { Allow: true, Block: false },
+                            sm: 6,
+                        },
+                        {
+                            k: CFG.geo_ignore_net,
+                            comp: NetmaskField,
+                            label: "Ignore IP addresses",
+                            placeholder: "none",
+                            helperText: "Bypass geo-filtering",
+                            sm: 6,
                         },
                     ]
                 ] }),
@@ -217,9 +227,11 @@ export default function InternetPage({ setTitleSide }: PageProps) {
                         toField: x => x.replaceAll(',', '\n'),
                         helperText: md("Example: your.domain.com\nMultiple domains on separate lines")
                     },
+                    values.acme_domain?.split(',').some(isIP) && h(Alert, { severity: 'info' },
+                        "IP addresses require Let's Encrypt's short-lived profile: the whole certificate will last 160 hours, and automatic renew is necessary"),
                     {
                         k: 'acme_renew',
-                        label: "Automatic renew one month before expiration",
+                        label: "Automatic renew before expiration",
                         comp: BoolField,
                         disabled: !values.acme_domain
                     },
@@ -231,7 +243,10 @@ export default function InternetPage({ setTitleSide }: PageProps) {
                     ...saving && { loading: true },
                     async onClick() {
                         const [domain, ...altNames] = values.acme_domain.split(',')
-                        const fresh = domain === cert.data.subject?.CN && Number(new Date(cert.data.validTo)) - Date.now() >= 30 * DAY
+                        const validTo = Number(new Date(cert.data.validTo))
+                        const renewBefore = (validTo - Number(new Date(cert.data.validFrom))) / 3
+                        const fresh = cert.data.altNames?.includes(domain)
+                            && validTo - Date.now() >= renewBefore
                         if (fresh && !await confirmDialog("Your certificate is still good", { trueText: "Make a new one anyway" }))
                             return
                         if (!await confirmDialog("HFS must temporarily serve HTTP on public port 80, and your router must be configured or this operation will fail")) return
@@ -331,9 +346,10 @@ export default function InternetPage({ setTitleSide }: PageProps) {
                     ),
             }),
             h(DataLine),
-            h(Device, { name: "Internet", icon: PublicTwoTone, ip: publicIps,
+            h(Device, { name: "Internet", icon: PublicTwoTone, ip: publicIpsError ? [] : publicIps,
                 color: checkResult ? 'success' : checkResult === false ? 'error' : doubleNat ? 'warning' : undefined,
-                below: checking ? h(LinearProgress, { sx: { height: '1em' } }) : publicIps && h(Box, { className: HIDE_IN_TESTS },
+                below: publicIpsError ? String(publicIpsError)
+                    : checking ? h(LinearProgress, { sx: { height: '1em' } }) : publicIps && h(Box, { className: HIDE_IN_TESTS },
                     doubleNat && h(LinkBtn, { sx: { display: 'block' }, onClick: () => alertDialog(MSG_ISP, 'warning') }, "Double NAT"),
                     checkResult ? "Working!" : checkResult === false ? "Failed!" : '',
                     ' ',
@@ -476,10 +492,12 @@ function DataLine() {
 
 function Device({ name, icon, color, ip, below }: any) {
     const fontSize = 'min(20vw, 10vh)'
+    const ips = wantArray(ip)
+    const onlyV4 = ips.every(x => typeof x === 'string' && isIP(x) && !x.includes(':'))
     return h(Box, { sx: { display: 'inline-block', textAlign: 'center' } },
         h(icon, { color, sx: { fontSize, mb: '-0.1em' } }),
         h(Box, { sx: { fontSize: 'larger' } }, name),
-        ip === undefined ? h(Skeleton) : h(Box, { sx: { fontSize: 'smaller', whiteSpace: 'pre-wrap' }, className: 'ip ' + HIDE_IN_TESTS }, wantArray(ip).join('\n') || "unknown"),
+        ip === undefined ? h(Skeleton) : h(Box, { sx: { fontSize: 'smaller', whiteSpace: onlyV4 ? 'pre' : 'pre-wrap' }, className: 'ip ' + HIDE_IN_TESTS }, ips.join('\n') || "unknown"),
         below ? h(Box, { sx: { fontSize: 'smaller' } }, below) : h(Skeleton),
     )
 }

@@ -85,6 +85,7 @@ Some properties use a `Who` descriptor, with one of these values:
 - `localhost_admin` should Admin be accessed without credentials when on localhost. Default is true.
 - `proxies` number of proxies between server and clients to be trusted about providing clients' IP addresses. Default is 0.
 - `delete_unfinished_uploads_after` should unfinished uploads be deleted after a number of seconds. 0 for immediate, empty for never. Default is 1 day.
+- `own_upload_delete_hours` for how many hours an uploader can delete their own uploaded file. 0 disables. Default is 24.
 - `favicon` path to file to be used as favicon. Default is none.
 - `force_https` redirect http traffic to https. Requires https to be working. Default is true.
 - `force_lang` force translation for frontend. Default is none, meaning *let browser decide*.
@@ -127,6 +128,7 @@ Some properties use a `Who` descriptor, with one of these values:
 - `max_downloads_per_ip` limit the number of concurrent downloads for the same IP address. Default is unlimited.
 - `max_downloads_per_account` limit the number of concurrent downloads for each account. This is enforced only for connections that are logged in and will override other similar settings. Default is unlimited.
 - `geo_enable` when enabled, country is determined for each request/connection. The necessary database will be downloaded every month (2MB).
+- `geo_ignore_net` IP mask ignored by Geo IP filtering. Default is none.
 - `geo_allow` set true if `geo_list` should be treated as whitelist, set false for blacklist. Default will ignore the list.
 - `geo_list` list of country codes to be used as whitelist or blacklist. Default is none.
 - `geo_allow_unknown` set false to disconnect connections for which country cannot be determined. Works only if `geo_allow` is set. Default is true. 
@@ -135,6 +137,7 @@ Some properties use a `Who` descriptor, with one of these values:
   Multiple URLs are supported, and you can specify one for each line.
 - `outbound_proxy` if you need outgoing http(s) requests to pass through an HTTP proxy. E.g.: `http://user:password@localhost:8888`. Default is none.
   Setting one will trigger a test request to google.com. You can skip this with env HFS_SKIP_PROXY_TEST=1 . 
+- `outbound_interface` IP address to use for outgoing HTTP(S) requests made by HFS. Default is automatic.
 - `auto_basic` automatically detect (based on user-agent) when the basic web interface should be served, to support legacy browsers. Default is true. No UI.
   You can disable it setting it to `false`, or recognize additional user-agents by setting a regular expression. 
 - `file_timeout` number of seconds to wait before giving up when accessing a file. Default is 3. No UI.
@@ -166,7 +169,9 @@ In the second example, HFS shows a folder named "data" at the root (name inferre
 
 Valid keys in a node are:
 - `name`: this is the name we'll use to display this file/folder. If not provided, HFS will infer it from the source. At least `name` or `source` must be provided.
-- `source`: absolute or relative path of where to get the content
+- `source`: absolute or relative path of where to get the content. If it's a folder, it should end with `/` (or `\\` on Windows).
+- `see_without_probing`: for folders whose disk source may be slow or unavailable, show the folder in its parent's list
+  without checking the source or reading its metadata
 - `children`: just for folders, specify its virtual children.
   Value is a list and its entries are nodes.
 - `rename`: when `source` is a folder, you can rename entries *virtually* as they are read from disk.

@@ -5,9 +5,9 @@ import { BoolField, Form, MultiSelectField, NumberField, SelectField } from '@hf
 import { Alert, Box } from '@mui/material'
 import { apiCall } from './api'
 import { alertDialog, useDialogBarColors } from './dialog'
-import { apiNewPassword, formatTimestamp, isEqualLax, prefix, reactJoin, useIsMobile, wantArray } from './misc'
+import { apiNewPassword, formatTimestamp, isModifiedConfig, prefix, reactJoin, useIsMobile, wantArray } from './misc'
 import { Btn, Flex, IconBtn, NetmaskField, propsForModifiedValues } from './mui'
-import { Account } from './AccountsPage'
+import { type Account } from './AccountsPage'
 import { AutoDelete, Delete } from '@mui/icons-material'
 import { state, useSnapState } from './state'
 import VfsPathField from './VfsPathField'
@@ -36,6 +36,7 @@ export default function AccountForm({ account, done, groups, addToBar, reload }:
     const { members } = account
     const pluginAuth = account.plugin?.auth
     return h(Form, {
+        key: account.username, // remount on account changes because Form owns validation state for the current record
         formRef: ref,
         values,
         set(v, k) {
@@ -141,16 +142,14 @@ export default function AccountForm({ account, done, groups, addToBar, reload }:
                     username: account.username,
                     changes: withoutPassword,
                 })
-                if (password)
+                if (password) {
                     await apiNewPassword(values.username, password)
+                    setValues(values => ({ ...values, password: '', password2: '' }))
+                }
                 if (account.username === username)
                     state.username = values.username
                 done(got?.username, saveBtn) // username may have been changed, so we pass it back
             }
         }
     })
-}
-
-export function isModifiedConfig(a: any, b: any) {
-    return !isEqualLax(a, b, (a,b) => !a && !b || undefined)
 }

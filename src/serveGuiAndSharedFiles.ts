@@ -1,6 +1,6 @@
 import Koa from 'koa'
 import { basename, dirname, join } from 'path'
-import { getDefaultFile, getNodeName, nodeIsFolder, statusCodeForMissingPerm, urlToNode, vfs, VfsNode, walkNode } from './vfs'
+import { getDefaultFile, getNodeName, nodeIsFolder, statusCodeForMissingPerm, urlToNode, vfs, VfsNodeWithPath, walkNode } from './vfs'
 import { sendErrorPage } from './errorPages'
 import events from './events'
 import {
@@ -10,7 +10,7 @@ import {
 } from './cross-const'
 import { getUploadTempFor, uploadWriter } from './upload'
 import { handleMultipartUpload } from './multipartUpload'
-import { once } from 'events'
+import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import { serveFile, serveFileNode } from './serveFile'
 import { BUILD_TIMESTAMP, DEV, MIME_AUTO, VERSION } from './const'
@@ -31,6 +31,7 @@ import { setCommentFor } from './comments'
 import { basicWeb, detectBasicAgent } from './basicWeb'
 import { customizedIcons, ICONS_FOLDER } from './icons'
 import { getPluginInfo } from './plugins'
+import { deleteUploadOwner } from './uploadOwners'
 
 const serveFrontendFiles = serveGuiFiles(process.env.FRONTEND_PROXY, FRONTEND_URI)
 const serveFrontendPrefixed = mount(FRONTEND_URI.slice(0,-1), serveFrontendFiles)
@@ -72,7 +73,7 @@ export const serveSharedFiles: Koa.Middleware = async (ctx, next) => {
         const decPath = safeDecodeURIComponent(path, '')
         const fn = basename(decPath)
         const folderUri = pathEncode(dirname(decPath)) // re-encode to get readable urls
-        const folder = await urlToNode(folderUri, ctx, vfs, true) // we don't require the folder to already exist, but to be mapped on disk AND to have proper permissions
+        const folder = await urlToNode(folderUri, ctx, vfs.compiled(), { allowMissing: true }) // we don't require the folder to already exist, but to be mapped on disk AND to have proper permissions
         if (!folder)
             return sendErrorPage(ctx, HTTP_NOT_FOUND)
         ctx.state.uploadPath = decPath
@@ -114,6 +115,7 @@ export const serveSharedFiles: Koa.Middleware = async (ctx, next) => {
                 return ctx.status = HTTP_FAILED_DEPENDENCY
             await rm(source, { recursive: true })
             await deleteStoredFileAttrs(source)
+            deleteUploadOwner(path)
             void setCommentFor(source, '') // necessary only to clean a possible descript.ion or kvstorage
             return ctx.status = HTTP_OK
         } catch (e: any) {
@@ -154,7 +156,7 @@ export const serveSharedFiles: Koa.Middleware = async (ctx, next) => {
         : (basicWeb(ctx, node) || serveFrontendFiles(ctx, next))
 }
 
-async function sendFolderList(node: VfsNode, ctx: Koa.Context) {
+async function sendFolderList(node: VfsNodeWithPath, ctx: Koa.Context) {
     if ((await events.emitAsync('getList', { node, ctx }))?.isDefaultPrevented())
         return
     let { depth=0, folders, prepend } = ctx.query
@@ -191,9 +193,8 @@ async function calcHash(fn: string, limit=Infinity) {
             done()
         }
     })
-    fs.createReadStream(fn, { end: limit - 1 }).pipe(stream)
     console.debug('Hashing', fn)
-    await once(stream, 'finish')
+    await pipeline(fs.createReadStream(fn, { end: limit - 1 }), stream)
     console.debug('Hashed', fn)
     return hash.digest().toString(16)
 }

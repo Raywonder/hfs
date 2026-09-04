@@ -1,15 +1,15 @@
 // This file is part of HFS - Copyright 2021-2023, Massimo Melina <a@rejetto.com> - License https://www.gnu.org/licenses/gpl-3.0.txt
 
 import {
-    getNodeName, isSameFilenameAs, nodeIsFolder, saveVfs, urlToNode, vfs, VfsNode, applyParentToChild,
+    getFreeVfsName, getNodeName, isSameFilenameAs, nodeIsFolder, saveVfs, urlToNode, vfs, VfsNode, applyParentToChild,
     permsFromParent, isRoot, nodeStats
 } from './vfs'
 import _ from 'lodash'
 import { mkdir } from 'fs/promises'
 import { ApiError, ApiHandlers } from './apiMiddleware'
-import { dirname, extname, join, resolve } from 'path'
+import { dirname, join, resolve } from 'path'
 import {
-    enforceFinal, enforceStarting, isDirectory, isValidFileName, isWindowsDrive, makeMatcher, pathDecode, pathEncode, PERM_KEYS,
+    enforceFinal, enforceStarting, hasFinalSlash, isDirectory, isValidFileName, isWindowsDrive, makeMatcher, pathDecode, pathEncode, PERM_KEYS,
     VFS_STORED_KEYS, statWithTimeout, VfsNodeAdminSend
 } from './misc'
 import {
@@ -35,7 +35,7 @@ export default {
     async get_vfs() {
         return { root: await recur() }
 
-        async function recur(node=vfs): Promise<VfsNodeAdminSend> {
+        async function recur(node=vfs.compiled()): Promise<VfsNodeAdminSend> {
             const { source } = node
             const stats = await nodeStats(node)
             const isFolder = nodeIsFolder(node)
@@ -73,7 +73,7 @@ export default {
                 return new ApiError(HTTP_BAD_REQUEST, 'bad name')
             // check for siblings with the same name
             const parent = await urlToNodeOriginal(dirname(uri))
-            if (parent?.children?.find(x => getNodeName(x) === props.name))
+            if (parent?.children?.find(x => x !== n && isSameFilenameAs(props.name)(x)))
                 return new ApiError(HTTP_CONFLICT, 'name already present')
         }
         Object.assign(n, sanitizeVfsProps(props))
@@ -121,28 +121,24 @@ export default {
     },
 
     // legacy – not currently used by the UI
-    async add_vfs({ parent, source, name, ...rest }) {
+    async add_vfs({ parent, source, name, skip_source_check, ...rest }) {
         if (!source && !name)
             return new ApiError(HTTP_BAD_REQUEST, 'name or source required')
         if (name && !isValidFileName(name))
             return new ApiError(HTTP_BAD_REQUEST, 'bad name')
-        const parentNode = parent ? await urlToNodeOriginal(parent) : vfs
+        const parentNode = parent ? await urlToNodeOriginal(parent) : vfs.compiled()
         if (!parentNode)
             return new ApiError(HTTP_NOT_FOUND, 'parent not found')
         if (!nodeIsFolder(parentNode))
             return new ApiError(HTTP_NOT_ACCEPTABLE, 'parent not a folder')
         if (isWindowsDrive(source))
             source += '\\' // slash must be included, otherwise it will refer to the cwd of that drive
-        const isFolder = source && await isDirectory(source)
-        if (source && isFolder === undefined)
+        const isFolder = source && (skip_source_check ? hasFinalSlash(source) : await isDirectory(source))
+        if (source && !skip_source_check && isFolder === undefined)
             return new ApiError(HTTP_NOT_FOUND, 'source not found')
         const child = { source, name, ...sanitizeVfsProps(rest) }
         name = getNodeName(child) // could be not given as input
-        const ext = extname(name)
-        const noExt = ext ? name.slice(0, -ext.length) : name
-        let idx = 2
-        while (parentNode.children?.find(isSameFilenameAs(name)))
-            name = `${noExt} ${idx++}${ext}`
+        name = getFreeVfsName(parentNode.children, name)
         child.name = name
         simplifyName(child)
         ;(parentNode.children ||= []).unshift(child)
@@ -209,9 +205,10 @@ export default {
                         for (const n of await getDrives())
                             list.add({ n, k: 'd' })
                     } catch (error) {
+                        list.error(String(error))
                         console.debug(error)
                     }
-                    return
+                    return list.close()
                 }
                 const sendPropsAsap = getDiskSpace(path).then(x => x && list.props(x))
                 try {

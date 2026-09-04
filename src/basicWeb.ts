@@ -2,15 +2,15 @@ import { getCurrentUsername, setLoggedIn } from './auth'
 import { BASIC_AUTHENTICATE_HEADER, HTTP_UNAUTHORIZED } from './cross-const'
 import Koa from 'koa'
 import { defineConfig } from './config'
-import { getNodeName, getDefaultFile, nodeIsFolder, VfsNode, walkNode } from './vfs'
-import { asyncGeneratorToReadable, Dict, escapeHTML, filterMapGenerator, pathEncode } from './misc'
+import { getNodeName, getDefaultFile, nodeIsFolder, VfsNodeWithPath, walkNode } from './vfs'
+import { asyncGeneratorToReadable, CFG, Dict, escapeHTML, filterMapGenerator, pathEncode } from './misc'
 import _ from 'lodash'
 import { title } from './adminApis'
 import { getSection } from './customHtml'
 
-const autoBasic = defineConfig<boolean|string, null|RegExp>('auto_basic', true, v => _.isString(v) ? new RegExp(v, 'i') : null)
+const autoBasic = defineConfig<boolean|string, null|RegExp>(CFG.auto_basic, true, v => _.isString(v) ? new RegExp(v, 'i') : null)
 
-export function basicWeb(ctx: Koa.Context, node: VfsNode) {
+export function basicWeb(ctx: Koa.Context, node: VfsNodeWithPath) {
     const { get } = ctx.query
     if (get === 'login') {
         if (getCurrentUsername(ctx))
@@ -36,7 +36,8 @@ export function basicWeb(ctx: Koa.Context, node: VfsNode) {
     const stream = asyncGeneratorToReadable(filterMapGenerator(walker, async el => {
         const isFolder = nodeIsFolder(el)
         const name = getNodeName(el) + (isFolder ? '/' : '')
-        return `<li>${a(pathEncode(name) + (isFolder && !await getDefaultFile(el, ctx) ? force : ''), name)}\n`
+        const forceThis = isFolder && (el.see_without_probing || !await getDefaultFile(el, ctx)) ? force : ''
+        return `<li>${a(pathEncode(name) + forceThis, name)}\n`
     }))
     ctx.body = stream
     stream.push(`<meta name="viewport" content="width=device-width" />`)

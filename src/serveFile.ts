@@ -18,7 +18,7 @@ import { Readable } from 'stream'
 import { createHash } from 'crypto'
 import iconv from 'iconv-lite'
 
-const allowedReferer = defineConfig('allowed_referer', '')
+const allowedReferer = defineConfig(CFG.allowed_referer, '')
 const maxDownloads = downloadLimiter(defineConfig(CFG.max_downloads, 0), () => true)
 const maxDownloadsPerIp = downloadLimiter(defineConfig(CFG.max_downloads_per_ip, 0), ctx => ctx.ip)
 const maxDownloadsPerAccount = downloadLimiter(defineConfig(CFG.max_downloads_per_account, 0), ctx => getCurrentUsername(ctx) || undefined)
@@ -63,18 +63,22 @@ export async function serveFileNode(ctx: Koa.Context, node: VfsNode) {
             : GUI_ASSET_MIME.test(mimeString || mimetypes.lookup(source||'') || ''))
     await serveFile(ctx, source||'', mimeString)
 
-    if (await maxDownloadsPerAccount(ctx) === undefined) // returning false will not execute other limits
-        await maxDownloads(ctx) || await maxDownloadsPerIp(ctx)
+    await enforceDownloadLimits(ctx)
 }
 
-const mimeCfg = defineConfig<Dict<string>, (name: string) => string | undefined>('mime', {}, obj => {
+export async function enforceDownloadLimits(ctx: Koa.Context) {
+    return await maxDownloadsPerAccount(ctx)
+        ?? (await maxDownloads(ctx) || await maxDownloadsPerIp(ctx)) // a configured account limit overrides the global and IP limits
+}
+
+const mimeCfg = defineConfig<Dict<string>, (name: string) => string | undefined>(CFG.mime, {}, obj => {
     const matchers = Object.keys(obj).map(k => makeMatcher(k))
     const values = Object.values(obj)
     return (name: string) => values[matchers.findIndex(matcher => matcher(name))]
 })
 
 // after this number of seconds, the browser should check the server to see if there's a newer version of the file
-const cacheControlDiskFiles = defineConfig('cache_control_disk_files', 5)
+const cacheControlDiskFiles = defineConfig(CFG.cache_control_disk_files, 5)
 
 export async function serveFile(ctx: Koa.Context, filePath:string, mime?:string, cached?: { stats: Stats, content: string | Buffer }) {
     if (!filePath)

@@ -46,8 +46,14 @@ class Logger {
     }
 
     reopen() {
-        return this.stream = createFileWithPath(this.path, { flags: 'a' })
-            ?.on('error', () => this.stream = undefined)
+        const {path} = this
+        const s = this.stream = createFileWithPath(path, { flags: 'a' })
+        s?.on('error', e => {
+            if (this.stream === s) // a late error from an old stream must not detach its replacement
+                this.stream = undefined
+            console.error("Cannot write log file", path, String(e))
+        })
+        return s
     }
 }
 
@@ -71,6 +77,7 @@ const logRotation = defineConfig(CFG.log_rotation, 'weekly')
 const dontLogNet = defineConfig(CFG.dont_log_net, '127.0.0.1|::1', v => makeNetMatcher(v))
 const logUA = defineConfig(CFG.log_ua, false)
 const logSpam = defineConfig(CFG.log_spam, false)
+const logHost = defineConfig(CFG.log_host, false)
 
 const debounce = _.debounce(cb => cb(), 1000) // with this technique, i'll be able to debounce some code respecting the references in its closure
 
@@ -128,7 +135,7 @@ export const logMw: Koa.Middleware = async (ctx, next) => {
         const date = `${a[2]}/${a[1]}/${a[3]}:${a[4]} ${a[5]?.slice(3)}`
         const user = getCurrentUsername(ctx) || userAtStart
         const length = ctx.state.length ?? ctx.length
-        const uri = ctx.originalUrl
+        const uri = ctx.state.safeUrl
         const duration = (Number(reqEnd) - Number(reqStart)) / 1000
         ctx.logExtra(ctx.vfsNode && {
             speed: Math.round(length / duration),
@@ -142,6 +149,8 @@ export const logMw: Koa.Middleware = async (ctx, next) => {
             ctx.logExtra({ country: conn.country })
         if (logUA.get())
             ctx.logExtra({ ua: ctx.get('user-agent') || undefined })
+        if (logHost.get())
+            ctx.logExtra({ host: ctx.get('host') || undefined })
         const extra = ctx.state.logExtra
         if (events.anyListener(logger.name)) // small optimization: this event can happen often, while most times there's no listener, and the parameters object is constructed pointlessly. A benchmark measured it 20% faster (just the line), while maybe it was not necessary.
             events.emit(logger.name, { ctx, length, user, ts: reqEnd, uri, extra })

@@ -3,7 +3,7 @@
 import compress from 'koa-compress'
 import Koa from 'koa'
 import { API_URI, DEV } from './const'
-import { ALLOW_SESSION_IP_CHANGE, DAY, hasDirTraversal, isLocalHost, netMatches, splitAt, stream2string, try_, tryJson } from './misc'
+import { ALLOW_SESSION_IP_CHANGE, CFG, DAY, hasDirTraversal, isLocalHost, netMatches, splitAt, stream2string, try_, tryJson } from './misc'
 import { Readable } from 'stream'
 import { applyBlock } from './block'
 import { Account, accountCanLogin, accounts, getAccount, getFromAccount, normalizeUsername } from './perm'
@@ -16,10 +16,10 @@ import session from 'koa-session'
 import { app } from './index'
 import events from './events'
 
-const forceHttps = defineConfig('force_https', true)
-defineConfig('ignore_proxies', false)
-const allowAuthorizationHeader = defineConfig('authorization_header', true)
-export const sessionDuration = defineConfig('session_duration', Number(process.env.SESSION_DURATION) || DAY/1000,
+const forceHttps = defineConfig(CFG.force_https, true)
+defineConfig(CFG.ignore_proxies, false)
+const allowAuthorizationHeader = defineConfig(CFG.authorization_header, true)
+export const sessionDuration = defineConfig(CFG.session_duration, Number(process.env.SESSION_DURATION) || DAY/1000,
     v => v * 1000)
 
 export const gzipper = compress({
@@ -93,6 +93,12 @@ export function getProxyDetected() {
 export const prepareState: Koa.Middleware = async (ctx, next) => {
     // normalize once so auth, filters and logging agree on the same client address
     ctx.request.ip = normalizeIp(ctx.ip)
+    ctx.state.safeUrl = ctx.originalUrl
+    if (ctx.query.login) {
+        const query = new URLSearchParams(ctx.querystring)
+        query.set('login', '...')
+        ctx.state.safeUrl = `${ctx.path}?${query}`
+    }
     const s = ctx.session
     if (s?.username) {
         if (s.ts < invalidateSessionBefore.get(s?.username)!)
@@ -162,6 +168,7 @@ declare module "koa" {
         params: Record<string, any>
         account?: Account // user logged in
         revProxyPath: string // must not have final slash
+        safeUrl: string // url with credentials removed
         connection: Connection
         whenProxyDetected?: Date
     }

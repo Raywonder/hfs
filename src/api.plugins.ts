@@ -6,7 +6,6 @@ import {
     stopPlugin, startPlugin, CommonPluginInterface, getMissingDependencies, findPluginByRepo, suspendPlugins,
 } from './plugins'
 import _ from 'lodash'
-import assert from 'assert'
 import { apiAssertTypes, HTTP_CONFLICT, HTTP_PRECONDITION_FAILED, newObj, waitFor } from './misc'
 import { ApiError, ApiHandlers } from './apiMiddleware'
 import { rm } from 'fs/promises'
@@ -173,6 +172,8 @@ const apis: ApiHandlers = {
 
     async uninstall_plugin({ id, deleteConfig }) {
         assertPluginId(id)
+        if (!getPluginInfo(id))
+            return new ApiError(HTTP_NOT_FOUND)
         await stopPlugin(id)
         await rm(PLUGINS_PATH + '/' + id,  { recursive: true, force: true })
         if (deleteConfig)
